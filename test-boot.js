@@ -63,7 +63,7 @@ function run(opts) {
   var els = {};
   ['cv', 'hud', 'rail', 'spacer', 'status', 'dice', 'stxt', 'sheet', 'hand', 'acts',
     'toast', 'modal', 'mbox', 'curtain', 'title', 'tHost', 'tJoin', 'tLocal', 'install',
-    'fatal', 'fatalTitle', 'fatalMsg', 'fatalRetry', 'logbox'].forEach(function (id) { els[id] = fakeEl(id); });
+    'fatal', 'fatalTitle', 'fatalMsg', 'fatalRetry', 'fit', 'tSolo', 'logbox'].forEach(function (id) { els[id] = fakeEl(id); });
   // mirror the class="hide" that these carry in the markup
   ['hud', 'modal', 'curtain', 'fatal', 'install'].forEach(function (id) { els[id].classList.add('hide'); });
 
@@ -94,6 +94,7 @@ function run(opts) {
   win.self = win;
   win.THREE = opts.three ? makeThree() : undefined;
   win.ENGINE = opts.engine ? require('/home/claude/tideholm/engine.js') : undefined;
+  win.BOT = opts.bot === false ? undefined : (opts.engine ? require('/home/claude/tideholm/bot.js') : undefined);
 
   var thrown = null;
   try { vm.createContext(win); vm.runInContext(code, win, { filename: 'client.js' }); }
@@ -101,12 +102,12 @@ function run(opts) {
 
   // simulate the user tapping each title button
   var tapErrors = [];
-  ['tHost', 'tJoin', 'tLocal'].forEach(function (id) {
+  ['tHost', 'tJoin', 'tSolo', 'tLocal'].forEach(function (id) {
     try { if (els[id].onclick) els[id].onclick({}); } catch (e) { tapErrors.push(id + ': ' + e.message); }
   });
   return {
     thrown: thrown,
-    handlers: ['tHost', 'tJoin', 'tLocal'].map(function (id) { return typeof els[id].onclick; }),
+    handlers: ['tHost', 'tJoin', 'tSolo', 'tLocal'].map(function (id) { return typeof els[id].onclick; }),
     fatalShown: !els.fatal.classList.contains('hide'),
     fatalText: els.fatalTitle.textContent,
     modalShown: !els.modal.classList.contains('hide'),
@@ -122,7 +123,7 @@ console.log('--- scenario A: three.js and engine.js both load ---');
 var a = run({ three: true, engine: true });
 console.log('  threw:', a.thrown ? a.thrown.message : 'no');
 console.log('  handlers:', a.handlers.join(', '), '| overlay:', a.fatalShown ? a.fatalText : 'none', '| sheet opened:', a.modalShown);
-ok(a.handlers.every(function (h) { return h === 'function'; }), 'A: all three title buttons are wired');
+ok(a.handlers.every(function (h) { return h === 'function'; }), 'A: all four title buttons are wired');
 ok(a.tapErrors.length === 0, 'A: tapping each button throws nothing (' + a.tapErrors.join('; ') + ')');
 ok(a.modalShown, 'A: tapping opens a sheet');
 ok(!a.fatalShown, 'A: no error overlay on the happy path');
@@ -178,6 +179,15 @@ var overlays = ['#title', '#modal', '#curtain', '#fatal'];
 overlays.forEach(function (sel) {
   ok(zOf(sel) !== null && zOf(sel) !== 0, 'D: ' + sel + ' declares an explicit z-index');
 });
+
+console.log('--- scenario E: bot.js fails to load ---');
+var e = run({ three: true, engine: true, bot: false });
+console.log('  threw:', e.thrown ? e.thrown.message : 'no');
+console.log('  handlers:', e.handlers.join(', '), '| overlay:', e.fatalShown ? e.fatalText : 'none');
+ok(e.handlers.every(function (h) { return h === 'function'; }), 'E: buttons still wired without bot.js');
+ok(e.tapErrors.length === 0, 'E: tapping throws nothing without bot.js (' + e.tapErrors.join('; ') + ')');
+ok(e.fatalShown, 'E: missing bot.js shows an on-screen explanation');
+ok(/bot\.js/.test(e.fatalText), 'E: the message names bot.js as the problem');
 
 console.log('\nPASS ' + pass + '   FAIL ' + fail);
 fails.forEach(function (f) { console.log('  ✗ ' + f); });

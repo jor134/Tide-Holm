@@ -27,7 +27,7 @@
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%;overflow:hidden;background:var(--deep);
   font-family:var(--body);color:var(--sand);overscroll-behavior:none;touch-action:none}
-canvas{display:block;position:fixed;inset:0}
+canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
 button{font-family:var(--body);font-size:15px;border:0;cursor:pointer;color:inherit}
 .hide{display:none!important}
 
@@ -51,10 +51,15 @@ button{font-family:var(--body);font-size:15px;border:0;cursor:pointer;color:inhe
 .pc .vp{font-family:var(--disp);font-size:19px;line-height:1;padding-left:4px;margin-top:1px}
 .medal{position:absolute;right:5px;top:5px;font-size:10px;letter-spacing:.5px;opacity:.9}
 
-#spacer{flex:1}
+#spacer{flex:1;pointer-events:none}   /* must never intercept board drags */
+#fit{position:fixed;right:10px;top:calc(var(--pad-t) + 80px);width:42px;height:42px;
+  border-radius:12px;background:rgba(13,21,36,.85);border:1.5px solid rgba(240,226,196,.2);
+  backdrop-filter:blur(8px);font-size:19px;z-index:20;display:flex;align-items:center;
+  justify-content:center;padding:0}
+#fit:active{transform:scale(.92)}
 
 /* dice + status */
-#status{align-self:center;margin-bottom:6px;display:flex;align-items:center;gap:10px;
+#status{align-self:center;margin-bottom:6px;pointer-events:none;display:flex;align-items:center;gap:10px;
   background:rgba(8,16,32,.86);border:1.5px solid rgba(240,226,196,.16);
   border-radius:999px;padding:7px 14px;backdrop-filter:blur(8px);font-size:13px;max-width:92vw}
 #dice{display:flex;gap:5px}
@@ -183,6 +188,7 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
   <div id="rail"></div>
   <div id="spacer"></div>
   <div id="status"><div id="dice"></div><span id="stxt">—</span></div>
+  <button id="fit" title="Fit the board to the screen">⤢</button>
   <div id="sheet">
     <div id="hand"></div>
     <div id="acts"></div>
@@ -199,6 +205,7 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
   <div class="stack">
     <button class="btn hot" id="tHost"><span>Start a table</span></button>
     <button class="btn" id="tJoin"><span>Join with a code</span></button>
+    <button class="btn" id="tSolo"><span>Play against bots</span></button>
     <button class="btn" id="tLocal"><span>Pass one phone around</span></button>
   </div>
   <button id="install" class="hide">Install Tideholm on this device</button>
@@ -217,6 +224,7 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
 if (!window.THREE) document.write('<scr' + 'ipt crossorigin="anonymous" src="https://unpkg.com/three@0.128.0/build/three.min.js"><\/scr' + 'ipt>');
 </script>
 <script src="engine.js"></script>
+<script src="bot.js"></script>
 <script>
 'use strict';
 var E = window.ENGINE;   // reassigned by preflight() once load order is confirmed
@@ -235,6 +243,14 @@ var RESMETA = {
   grain:  { ic: '🌾', col: '#e3bb4a', name: 'Grain' },
   ore:    { ic: '⛏️', col: '#8b93a8', name: 'Ore' }
 };
+/* Hex rendering constants — the geometry test reads these directly.
+   THREE's CylinderGeometry places its first vertex at +Z (it uses sin for x and
+   cos for z), which already matches the engine's pointy-top lattice. Any yaw
+   other than zero rotates the prisms off the lattice and they overlap. */
+var HEX_R_DRAW = 0.96;    // rendered radius; engine lattice radius is 1.0
+var HEX_OUTLINE = 1.035;  // outline scale — must keep 2*R*OUTLINE*cos(30) under the 1.7321 spacing
+var HEX_YAW = 0;
+
 var TERCOL = { forest: 0x2e7d52, pit: 0xc4693c, pasture: 0x93c95e, field: 0xe3bb4a, mountain: 0x8b93a8, waste: 0xd9c9a3 };
 var DEVNAME = { knight: 'Knight', point: 'Charter', roads: 'Road Building', plenty: 'Bounty', monopoly: 'Monopoly' };
 var DEVDESC = {
@@ -269,18 +285,73 @@ function seatFor(g) {
   return E.currentPlayer(g);
 }
 
-function LocalStart(names) {
+function LocalStart(specs) {
   var g = E.createGame({ code: 'LOCAL', mode: 'local', seed: (Math.random() * 1e9) | 0 });
-  names.forEach(function (n, i) { E.addPlayer(g, n, 'L' + i); });
+  specs.forEach(function (sp, i) {
+    E.addPlayer(g, sp.name, 'L' + i, { bot: !!sp.bot, level: sp.level });
+  });
   E.startGame(g);
   Net.mode = 'local'; Net.localGame = g; Net.pid = null;
+  Net.humans = [];
+  specs.forEach(function (sp, i) { if (!sp.bot) Net.humans.push(i); });
+  Net.lastHuman = Net.humans.length ? Net.humans[0] : 0;
   pushLocal();
+  scheduleBot(900);
+}
+
+/* Whose hand is on screen. In pass-and-play that follows the acting seat; with
+   bots at the table it must stay on a human, or the screen would show the bot's
+   cards to the person holding the phone. */
+function viewSeat(g) {
+  var s = seatFor(g);
+  if (!g.players[s].bot) { Net.lastHuman = s; return s; }
+  if (Net.lastHuman != null && g.players[Net.lastHuman] && !g.players[Net.lastHuman].bot) return Net.lastHuman;
+  for (var i = 0; i < g.players.length; i++) if (!g.players[i].bot) return i;
+  return 0;
+}
+
+/* ---- bot driver ----
+   One action per tick, with a pause long enough to follow what happened.
+   Bots are handed E.redact(state, ownId), the same censored view a human gets. */
+var botTimer = null;
+var BOT_PACE = {
+  setupPlace: 850, roll: 950, moveRobber: 900, discard: 700,
+  buildCity: 750, buildSettlement: 750, buildRoad: 550, buyDev: 650,
+  playDev: 900, bankTrade: 550, offerTrade: 900, respondTrade: 800,
+  cancelTrade: 400, endTurn: 550
+};
+function scheduleBot(delay) {
+  clearTimeout(botTimer);
+  if (Net.mode !== 'local') return;
+  botTimer = setTimeout(botTick, delay == null ? 600 : delay);
+}
+function botTick() {
+  var g = Net.localGame;
+  if (!g || g.phase === 'over' || g.phase === 'lobby' || !window.BOT) return;
+  for (var i = 0; i < g.players.length; i++) {
+    var p = g.players[i];
+    if (!p.bot) continue;
+    var action = null;
+    try { action = BOT.act(E.redact(g, p.id), i, p.level); }
+    catch (err) { action = { type: 'endTurn' }; }
+    if (!action) continue;
+    var r = E.applyAction(g, i, action);
+    if (!r.ok) {
+      // a bot must never be able to wedge the game
+      if (g.phase === 'main' && g.turn === i) E.applyAction(g, i, { type: 'endTurn' });
+      else if (g.trade && g.trade.to.indexOf(i) >= 0) E.applyAction(g, i, { type: 'respondTrade', accept: false });
+      else return;
+    }
+    pushLocal();
+    scheduleBot(BOT_PACE[action.type] || 600);
+    return;
+  }
 }
 function pushLocal() {
   // In pass-and-play every player uses the same screen, so the "viewer" is
   // whoever is currently acting. The curtain covers the handover.
   var g = Net.localGame;
-  Net.state = E.redact(g, g.players[seatFor(g)].id);
+  Net.state = E.redact(g, g.players[viewSeat(g)].id);
   Net.onState(Net.state);
 }
 function localAct(action) {
@@ -291,6 +362,7 @@ function localAct(action) {
   var r = E.applyAction(g, seat, action);
   if (!r.ok) toast(r.error);
   pushLocal();
+  scheduleBot(r.ok ? 500 : 900);
   return r;
 }
 
@@ -388,18 +460,40 @@ function initScene() {
   pieceGroup = new THREE.Group(); scene.add(pieceGroup);
   markerGroup = new THREE.Group(); scene.add(markerGroup);
 
-  resize();
-  window.addEventListener('resize', resize);
+  resize(true);
+  if ($('fit')) $('fit').onclick = function () { fitCamera(true); cam.phi = 0.86; cam.theta = 0; };
+  window.addEventListener('resize', function () { resize(false); });
+  window.addEventListener('orientationchange', function () { setTimeout(function () { resize(true); }, 250); });
   bindCamera(cv);
   animate();
 }
-function resize() {
+var BOARD_R = 5.9;   // outer hex ring (4.6) + port docks + a little margin
+
+function resize(refit) {
   var w = innerWidth, h = innerHeight;
-  renderer.setSize(w, h, false);
+  renderer.setSize(w, h);            // let three set the CSS size too
   camera.aspect = w / h;
+  camera.fov = w / h < 0.75 ? 58 : 46;   // widen on tall narrow phones
   camera.updateProjectionMatrix();
-  cam.dist = h > w ? 13.5 : 10.5;
+  fitCamera(refit !== false);
 }
+
+/* Distance at which a sphere of BOARD_R is fully inside the frustum, checked
+   against BOTH axes. On a portrait phone the horizontal field is the binding
+   constraint by a wide margin, which is what the old hardcoded 13.5 missed. */
+function fitCamera(snap) {
+  var vFov = camera.fov * Math.PI / 180;
+  var hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+  var d = Math.max(BOARD_R / Math.sin(vFov / 2), BOARD_R / Math.sin(hFov / 2));
+  cam.fit = d;
+  cam.min = d * 0.34;
+  cam.max = d * 1.45;
+  if (snap) cam.dist = d;
+  cam.dist = Math.max(cam.min, Math.min(cam.max, cam.dist));
+  scene.fog.near = d * 0.55;
+  scene.fog.far = d * 2.4;
+}
+function clampDist(v) { return Math.max(cam.min, Math.min(cam.max, v)); }
 
 /* --- camera control: one finger orbits, two fingers zoom --- */
 function bindCamera(cv) {
@@ -416,7 +510,7 @@ function bindCamera(cv) {
   function move(e) {
     if (pinch && e.touches && e.touches.length === 2) {
       var a = pt(e, 0), b = pt(e, 1), d = Math.hypot(a.x - b.x, a.y - b.y);
-      cam.dist = Math.max(6, Math.min(20, pinch.dist * pinch.d / d));
+      cam.dist = clampDist(pinch.dist * pinch.d / d);
       e.preventDefault(); return;
     }
     if (!drag) return;
@@ -428,8 +522,13 @@ function bindCamera(cv) {
     drag = p;
     e.preventDefault();
   }
+  var lastTap = 0;
   function up(e) {
-    if (drag && moved < 12 && Date.now() - downT < 400) tap(downPt);
+    if (drag && moved < 12 && Date.now() - downT < 400) {
+      var now = Date.now();
+      if (now - lastTap < 320) { fitCamera(true); cam.phi = 0.86; cam.theta = 0; lastTap = 0; }
+      else { lastTap = now; tap(downPt); }
+    }
     drag = null; pinch = null;
   }
   cv.addEventListener('touchstart', down, { passive: false });
@@ -440,12 +539,16 @@ function bindCamera(cv) {
   window.addEventListener('mousemove', function (e) { if (drag) move(e); });
   window.addEventListener('mouseup', up);
   cv.addEventListener('wheel', function (e) {
-    cam.dist = Math.max(6, Math.min(20, cam.dist + e.deltaY * 0.012)); e.preventDefault();
+    cam.dist = clampDist(cam.dist + e.deltaY * 0.012); e.preventDefault();
   }, { passive: false });
 }
 function tap(p) {
   if (!p || !markerGroup.children.length) return;
-  var m = new THREE.Vector2((p.x / innerWidth) * 2 - 1, -(p.y / innerHeight) * 2 + 1);
+  var r = renderer.domElement.getBoundingClientRect();
+  var m = new THREE.Vector2(
+    ((p.x - r.left) / r.width) * 2 - 1,
+    -((p.y - r.top) / r.height) * 2 + 1
+  );
   raycaster.setFromCamera(m, camera);
   var hits = raycaster.intersectObjects(markerGroup.children, true);
   for (var i = 0; i < hits.length; i++) {
@@ -518,9 +621,9 @@ function buildBoard(st) {
   var b = st.board;
 
   b.hexes.forEach(function (h) {
-    var geo = new THREE.CylinderGeometry(0.96, 0.96, 0.3, 6);
-    var grp = outlined(geo, toon(TERCOL[h.terrain]), 1.045);
-    grp.rotation.y = Math.PI / 6;
+    var geo = new THREE.CylinderGeometry(HEX_R_DRAW, HEX_R_DRAW, 0.3, 6);
+    var grp = outlined(geo, toon(TERCOL[h.terrain]), HEX_OUTLINE);
+    grp.rotation.y = HEX_YAW;
     grp.position.set(h.cx, 0, h.cz);
     boardGroup.add(grp);
 
@@ -658,9 +761,9 @@ function addEdgeMarkers(st, keys, color, cb) {
 function addHexMarkers(st, ids, cb) {
   ids.forEach(function (id, i) {
     var h = st.board.hexes[id];
-    var m = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 0.06, 6),
+    var m = new THREE.Mesh(new THREE.CylinderGeometry(0.82, 0.82, 0.06, 6),
       new THREE.MeshBasicMaterial({ color: 0x241d2e, transparent: true, opacity: 0.55 }));
-    m.rotation.y = Math.PI / 6;
+    m.rotation.y = HEX_YAW;
     m.position.set(h.cx, 0.4, h.cz);
     m.userData.pick = function () { cb(id); };
     m.userData.pulse = i * 0.25;
@@ -718,7 +821,9 @@ function renderRail(st) {
   st.players.forEach(function (p, i) {
     var c = el('div', 'pc' + (i === cur && st.phase !== 'over' ? ' act' : ''));
     var sw = el('div', 'swatch'); sw.style.background = p.color; c.appendChild(sw);
-    c.appendChild(el('div', 'nm', p.name + (i === st.me ? ' (you)' : '')));
+    var nm = el('div', 'nm', p.name + (p.bot ? ' ⌁' : (i === st.me ? ' (you)' : '')));
+    if (p.bot) nm.title = 'Bot — ' + (BOT.LEVELS[p.level] ? BOT.LEVELS[p.level].name : p.level);
+    c.appendChild(nm);
     c.appendChild(el('div', 'vp', p.vp + (i === st.me && st.players[i].dev ? '+' + st.players[i].dev.filter(function (d) { return d === 'point'; }).length : '')));
     var s = el('div', 'st');
     s.appendChild(el('span', null, '🂠 ' + p.handCount));
@@ -739,10 +844,10 @@ function setupSeat(st) {
   for (var j = n - 1; j >= 0; j--) o.push(j);
   return st.setupStep < o.length ? o[st.setupStep] : 0;
 }
-function mySeat(st) { return st.mode === 'local' ? seatFor(st) : st.me; }
+function mySeat(st) { return st.mode === 'local' ? viewSeat(st) : st.me; }
 function isMyTurn(st) {
   if (st.phase === 'over') return false;
-  if (st.mode === 'local') return true;
+  if (st.mode === 'local') return !st.players[seatFor(st)].bot;   // bots act on their own
   return (st.phase === 'setup' ? setupSeat(st) : st.turn) === st.me;
 }
 
@@ -759,6 +864,7 @@ function renderStatus(st) {
   else if (st.phase === 'discard') t = 'Discarding: ' + st.pendingDiscard.map(function (i) { return st.players[i].name; }).join(', ');
   else if (st.phase === 'robber') t = who + ' moves the raider';
   else if (st.trade) t = st.players[st.trade.from].name + ' is offering a trade';
+  else if (st.mode === 'local' && st.players[seatFor(st)].bot) t = st.players[seatFor(st)].name + ' is thinking\u2026';
   else t = who + '\u2019s turn';
   $('stxt').textContent = t;
 }
@@ -812,7 +918,10 @@ function renderActions(st) {
     return;
   }
   if (!isMyTurn(st)) {
-    a.appendChild(btn('👀', 'Watching \u2014 not your turn', '', 'wide', null, true));
+    var thinking = st.mode === 'local' && st.players[seatFor(st)].bot;
+    a.appendChild(btn(thinking ? '⌁' : '👀',
+      thinking ? st.players[seatFor(st)].name + ' is thinking\u2026' : 'Watching \u2014 not your turn',
+      '', 'wide', null, true));
     a.appendChild(btn('📜', 'Game log', '', 'wide', function () { openLog(st); }));
     return;
   }
@@ -942,7 +1051,10 @@ function renderInterrupts(st) {
 
   // discard
   if (st.phase === 'discard') {
-    var owes = st.mode === 'local' ? st.pendingDiscard[0] : (st.pendingDiscard.indexOf(st.me) >= 0 ? st.me : -1);
+    var owes = st.mode === 'local'
+      ? st.pendingDiscard.filter(function (i) { return !st.players[i].bot; })[0]
+      : (st.pendingDiscard.indexOf(st.me) >= 0 ? st.me : -1);
+    if (owes == null) owes = -1;
     if (owes >= 0 && !$('modal').dataset.kind) { openDiscard(st, owes); return; }
     if (owes < 0) closeIfKind('discard');
   } else closeIfKind('discard');
@@ -950,14 +1062,16 @@ function renderInterrupts(st) {
   // incoming trade offer
   if (st.trade) {
     var target = st.mode === 'local'
-      ? st.trade.to.filter(function (i) { return st.trade.declined.indexOf(i) < 0; })[0]
+      ? st.trade.to.filter(function (i) { return st.trade.declined.indexOf(i) < 0 && !st.players[i].bot; })[0]
       : (st.trade.to.indexOf(st.me) >= 0 && st.trade.declined.indexOf(st.me) < 0 ? st.me : -1);
     if (target == null || target < 0) closeIfKind('offer');
     else if ($('modal').dataset.kind !== 'offer') { openIncoming(st, target); return; }
   } else closeIfKind('offer');
 
   // pass-and-play handover
-  if (st.mode === 'local' && st.phase !== 'over' && st.phase !== 'lobby') {
+  var humans = st.players.filter(function (p) { return !p.bot; }).length;
+  if (st.mode === 'local' && humans > 1 && st.phase !== 'over' && st.phase !== 'lobby'
+      && !st.players[seatFor(st)].bot) {
     var need = st.players[seat].name;
     if (curtainFor !== need) { showCurtain(st, need); }
   }
@@ -1262,6 +1376,7 @@ function nameInput(ph) {
 
 function ready() {
   if (!window.ENGINE) { fatal('engine.js did not load', 'Commit engine.js next to index.html at the repo root and redeploy.'); return false; }
+  if (!window.BOT) { fatal('bot.js did not load', 'Commit bot.js next to index.html at the repo root and redeploy.'); return false; }
   if (!window.THREE) { fatal('The 3D library did not load', 'three.js is loaded from a CDN and did not arrive. Check the connection or whether this network blocks it.'); return false; }
   return true;
 }
@@ -1325,6 +1440,73 @@ $('tJoin').onclick = function () {
   modal(box, { dismiss: true });
 };
 
+var BOT_NAMES = ['Marn', 'Ossic', 'Vell', 'Threnn', 'Dolm'];
+var localBots = { count: 0, level: 'steady' };
+
+/* Segmented count picker plus the three level cards. Used by both the solo
+   flow and the pass-and-play flow. */
+function botPicker(box, state, minCount, maxCount, countLabel) {
+  box.appendChild(el('div', 'hdr', countLabel));
+  var seg = el('div', 'seg');
+  for (var n = minCount; n <= maxCount; n++) {
+    (function (n) {
+      var b = el('button', n === state.count ? 'on' : null, String(n));
+      b.onclick = function () {
+        state.count = n;
+        Array.prototype.forEach.call(seg.children, function (c) { c.className = ''; });
+        b.className = 'on';
+      };
+      seg.appendChild(b);
+    })(n);
+  }
+  box.appendChild(seg);
+
+  box.appendChild(el('div', 'hdr', 'How hard should they play'));
+  var list = el('div', 'plist');
+  ['casual', 'steady', 'sharp'].forEach(function (key) {
+    var L = BOT.LEVELS[key];
+    var b = el('button', 'pbtn' + (key === state.level ? ' on' : ''));
+    b.style.flexDirection = 'column'; b.style.alignItems = 'flex-start'; b.style.gap = '3px';
+    if (key === state.level) { b.style.borderColor = 'var(--brass)'; b.style.background = 'rgba(224,163,62,.14)'; }
+    b.appendChild(el('span', null, L.name));
+    var d = el('span', null, L.blurb);
+    d.style.fontSize = '12px'; d.style.opacity = '.62'; d.style.lineHeight = '1.4';
+    b.appendChild(d);
+    b.onclick = function () {
+      state.level = key;
+      Array.prototype.forEach.call(list.children, function (c) {
+        c.style.borderColor = 'rgba(240,226,196,.18)'; c.style.background = 'rgba(240,226,196,.08)';
+      });
+      b.style.borderColor = 'var(--brass)'; b.style.background = 'rgba(224,163,62,.14)';
+    };
+    list.appendChild(b);
+  });
+  box.appendChild(list);
+}
+
+$('tSolo').onclick = function () {
+  if (!ready()) return;
+  var state = { count: 3, level: 'steady' };
+  var box = el('div');
+  box.appendChild(el('h2', null, 'Play against bots'));
+  box.appendChild(el('p', 'sub', 'Runs entirely on this device, so it works with no connection. Bots see only what you see \u2014 they never look at your hand and never get extra resources.'));
+  var n = nameInput('Your name');
+  box.appendChild(n);
+  botPicker(box, state, 1, 5, 'How many bots');
+  var go = el('button', 'btn hot wide', 'Deal the board');
+  go.style.marginTop = '14px';
+  go.onclick = function () {
+    var me = n.value.trim() || 'You';
+    store('tideholm_name', me);
+    var specs = [{ name: me, bot: false }];
+    for (var i = 0; i < state.count; i++) specs.push({ name: BOT_NAMES[i], bot: true, level: state.level });
+    closeModal();
+    LocalStart(specs);
+  };
+  box.appendChild(go);
+  modal(box, { dismiss: true });
+};
+
 $('tLocal').onclick = function () {
   if (!ready()) return;
   var count = 3;
@@ -1355,12 +1537,17 @@ $('tLocal').onclick = function () {
     }
   }
   drawNames();
+  localBots = { count: 0, level: 'steady' };
+  botPicker(box, localBots, 0, 4, 'Add bots to fill the table');
   var go = el('button', 'btn hot wide', 'Deal the board');
-  go.style.marginTop = '6px';
+  go.style.marginTop = '14px';
   go.onclick = function () {
-    var ns = inputs.map(function (i, k) { return i.value.trim() || ('Player ' + (k + 1)); });
+    var specs = inputs.map(function (i, k) { return { name: i.value.trim() || ('Player ' + (k + 1)), bot: false }; });
+    for (var b = 0; b < localBots.count; b++) {
+      specs.push({ name: BOT_NAMES[b], bot: true, level: localBots.level });
+    }
     closeModal();
-    LocalStart(ns);
+    LocalStart(specs);
   };
   box.appendChild(go);
   modal(box, { dismiss: true });
@@ -1457,6 +1644,11 @@ function preflight() {
     return false;
   }
   E = window.ENGINE;
+  if (!window.BOT) {
+    fatal('bot.js did not load',
+      'The opponents live in a separate file. Commit bot.js next to index.html at the repo root and redeploy.');
+    return false;
+  }
   if (!window.THREE) {
     fatal('The 3D library did not load',
       'three.js is loaded from a CDN. Check the connection, or whether this network blocks cdnjs.cloudflare.com and unpkg.com.');

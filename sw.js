@@ -1,9 +1,9 @@
 /* Tideholm service worker.
    App shell is cached so the game opens offline for pass-and-play.
    The API is never cached — an authoritative game must always hit the network. */
-var CACHE = 'tideholm-v2';
+var CACHE = 'tideholm-v3';
 var THREEJS = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
-var SHELL = ['./', './index.html', './engine.js', './manifest.json', './icon-192.png', './icon-512.png', THREEJS];
+var SHELL = ['./', './index.html', './engine.js', './bot.js', './manifest.json', './icon-192.png', './icon-512.png', THREEJS];
 
 self.addEventListener('install', function (e) {
   e.waitUntil(caches.open(CACHE).then(function (c) {

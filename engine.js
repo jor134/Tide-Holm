@@ -186,6 +186,7 @@
       pendingDiscard: [],
       freeRoads: 0,
       playedDevThisTurn: false,
+      offersThisTurn: 0,
       trade: null,
       longest: { p: -1, len: 0 },
       army: { p: -1, n: 0 },
@@ -194,14 +195,16 @@
     };
   }
 
-  function addPlayer(g, name, pid) {
+  function addPlayer(g, name, pid, opts) {
     if (g.players.length >= 6) return { ok: false, error: 'Table is full — six players maximum.' };
     if (g.phase !== 'lobby') return { ok: false, error: 'This game has already started.' };
+    opts = opts || {};
     var i = g.players.length;
     g.players.push({
       id: pid, name: name || ('Player ' + (i + 1)), color: COLORS[i],
       hand: emptyHand(), dev: [], newDev: [], knights: 0,
-      roadsLeft: 15, settLeft: 5, cityLeft: 4, ports: [], connected: true
+      roadsLeft: 15, settLeft: 5, cityLeft: 4, ports: [], connected: true,
+      bot: !!opts.bot, level: opts.bot ? (opts.level || 'steady') : null
     });
     return { ok: true, index: i };
   }
@@ -442,6 +445,7 @@
     g.phase = 'roll';
     g.freeRoads = 0;
     g.playedDevThisTurn = false;
+    g.offersThisTurn = 0;
     g.trade = null;
     var pl = g.players[g.turn];
     pl.dev = pl.dev.concat(pl.newDev);
@@ -661,6 +665,7 @@
         var to = [];
         for (var t = 0; t < g.players.length; t++) if (t !== pi) to.push(t);
         g.trade = { from: pi, give: a.give, get: a.get, to: to, declined: [] };
+        g.offersThisTurn = (g.offersThisTurn || 0) + 1;
         log(g, pl.name + ' opens a trade.');
         return { ok: true };
       }

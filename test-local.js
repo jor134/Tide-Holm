@@ -91,5 +91,62 @@ for (var s=0;s<12;s++){
   eq(wronghand,0,'seed '+s+': acting player can always see their own hand');
   ok(completed,'seed '+s+': local game reaches a winner');
 }
+
+/* ---- solo mode: the screen must never show a bot's cards ----
+   Replicates viewSeat() and the bot driver from index.html. */
+var B=require('/home/claude/tideholm/bot.js');
+function viewSeatOf(g, lastHuman){
+  var s=seatFor(g);
+  if(!g.players[s].bot) return s;
+  if(lastHuman!=null && g.players[lastHuman] && !g.players[lastHuman].bot) return lastHuman;
+  for(var i=0;i<g.players.length;i++) if(!g.players[i].bot) return i;
+  return 0;
+}
+[['solo 1 bot',1,'casual'],['solo 3 bots',3,'steady'],['solo 5 bots',5,'sharp'],['2 humans 2 bots',2,'steady']].forEach(function(cfg,ci){
+  for(var seed=0;seed<4;seed++){
+    var g=E.createGame({code:'SOLO',seed:seed*13+ci});
+    var humans = cfg[0]==='2 humans 2 bots' ? 2 : 1;
+    for(var h=0;h<humans;h++) E.addPlayer(g,'H'+h,'h'+h,{});
+    for(var b=0;b<cfg[1];b++) E.addPlayer(g,'Bot'+b,'b'+b,{bot:true,level:cfg[2]});
+    E.startGame(g);
+    var lastHuman=0, exposures=0, wrongViewer=0, guard=0, botStalls=0;
+    while(g.phase!=='over' && guard++<9000){
+      var vs=viewSeatOf(g,lastHuman);
+      if(g.players[vs].bot) exposures++;
+      lastHuman=vs;
+      var view=E.redact(g,g.players[vs].id);
+      // the rendered hand must belong to a human, and be visible
+      if(view.me!==vs) wrongViewer++;
+      if(view.players[vs].hand===null) wrongViewer++;
+      view.players.forEach(function(p,i){ if(i!==vs && p.hand!==null && g.phase!=='over') exposures++; });
+
+      // driver: a bot acts if it can, otherwise the human seat does
+      var acted=false;
+      for(var i=0;i<g.players.length && !acted;i++){
+        if(!g.players[i].bot) continue;
+        var a=B.act(E.redact(g,g.players[i].id),i,g.players[i].level);
+        if(!a) continue;
+        var r=E.applyAction(g,i,a);
+        if(!r.ok){ botStalls++; if(g.phase==='main'&&g.turn===i) E.applyAction(g,i,{type:'endTurn'}); }
+        acted=true;
+      }
+      if(acted) continue;
+
+      // human seat plays a simple game so play can progress
+      var seat=seatFor(g);
+      if(g.players[seat].bot) break;
+      var hv=E.redact(g,g.players[seat].id);
+      var ha=B.act(hv,seat,'steady');
+      if(!ha) break;
+      var hr=E.applyAction(g,seat,ha);
+      if(!hr.ok){ if(g.phase==='main'&&g.turn===seat) E.applyAction(g,seat,{type:'endTurn'}); else break; }
+    }
+    eq(exposures,0,cfg[0]+' seed '+seed+': no bot hand is ever on screen');
+    eq(wrongViewer,0,cfg[0]+' seed '+seed+': the viewer always sees their own hand');
+    eq(botStalls,0,cfg[0]+' seed '+seed+': no bot produced an illegal move');
+    ok(g.phase==='over',cfg[0]+' seed '+seed+': game reaches a winner');
+  }
+});
+
 console.log('\nPASS '+pass+'   FAIL '+fail);
 if(fail){fails.slice(0,10).forEach(function(f){console.log('  ✗ '+f);});process.exit(1);}
