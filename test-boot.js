@@ -145,6 +145,40 @@ ok(c.tapErrors.length === 0, 'C: tapping throws nothing without engine.js (' + c
 ok(c.fatalShown, 'C: missing engine.js shows an on-screen explanation');
 ok(/engine\.js/.test(c.fatalText), 'C: the message names engine.js as the problem');
 
+/* ---- CSS stacking order ----
+   A stubbed DOM cannot see paint order, so this reads the real stylesheet.
+   The original bug: the modal opened correctly but sat behind the opaque
+   title screen, so every tap looked like it did nothing. */
+console.log('--- scenario D: overlay stacking order ---');
+var css = fs.readFileSync(HTML, 'utf8');
+css = css.slice(css.indexOf('<style>'), css.indexOf('</style>'));
+
+function zOf(sel) {
+  var re = new RegExp('\\' + '#' + sel.slice(1) + '\\s*\\{([^}]*)\\}');
+  var m = css.match(re);
+  if (!m) return null;
+  var z = m[1].match(/z-index\s*:\s*(-?\d+)/);
+  return z ? parseInt(z[1], 10) : 0;
+}
+var z = {
+  title: zOf('#title'), modal: zOf('#modal'), curtain: zOf('#curtain'),
+  toast: zOf('#toast'), fatal: zOf('#fatal')
+};
+console.log('  ', JSON.stringify(z));
+
+ok(z.modal > z.title, 'D: the modal sheet sits above the title screen (' + z.modal + ' > ' + z.title + ')');
+ok(z.curtain > z.modal, 'D: the pass-and-play curtain covers the modal (' + z.curtain + ' > ' + z.modal + ')');
+ok(z.toast > z.modal, 'D: toasts are readable over the modal (' + z.toast + ' > ' + z.modal + ')');
+ok(z.fatal > z.curtain && z.fatal > z.toast, 'D: the error overlay outranks everything');
+ok(z.title < z.modal && z.title < z.curtain && z.title < z.fatal,
+   'D: nothing the title screen can hide is ever opened over it');
+
+// every fullscreen fixed overlay must declare an explicit z-index, or DOM order decides
+var overlays = ['#title', '#modal', '#curtain', '#fatal'];
+overlays.forEach(function (sel) {
+  ok(zOf(sel) !== null && zOf(sel) !== 0, 'D: ' + sel + ' declares an explicit z-index');
+});
+
 console.log('\nPASS ' + pass + '   FAIL ' + fail);
 fails.forEach(function (f) { console.log('  ✗ ' + f); });
 if (fail) process.exit(1);

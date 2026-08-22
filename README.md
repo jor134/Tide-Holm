@@ -16,8 +16,6 @@ icon-512.png
 test.js           1211 engine assertions
 test-api.js       51 server assertions against a fake Redis
 test-local.js     36 pass-and-play handover assertions
-test-boot.js      12 boot assertions — proves the title buttons work even when
-                  three.js or engine.js fails to load
 ```
 
 Commit all of these at the repo root, `api/game.js` in an `api/` folder.
@@ -43,18 +41,6 @@ discard, ports at 3:1 and 2:1, all five development card types, player-to-player
 trading, Long Road, Standing Guard, hidden victory point cards, 2–6 players.
 
 Not in: the Seafarers-style variant (ships, islands, gold hexes). That is Stage 2.
-
-## If the title buttons do nothing
-
-They can't any more — but if the board never appears, an overlay will now tell you
-why. The two usual causes:
-
-- **engine.js is missing.** It has to be committed next to index.html at the repo
-  root. It is not inlined, on purpose: the browser and the server load the same
-  file so the rules can never diverge.
-- **three.js was blocked.** It comes from cdnjs, with a unpkg fallback. Corporate
-  and school networks sometimes block both. The service worker caches it after the
-  first successful load, so offline play works from then on.
 
 ## Known limitations
 

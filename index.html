@@ -66,7 +66,7 @@ button{font-family:var(--body);font-size:15px;border:0;cursor:pointer;color:inhe
 /* toast */
 #toast{position:fixed;left:50%;transform:translateX(-50%);top:calc(var(--pad-t) + 74px);
   background:#c0402e;color:#fff;padding:9px 15px;border-radius:10px;font-size:13.5px;
-  font-weight:500;max-width:88vw;text-align:center;opacity:0;transition:opacity .2s;z-index:60}
+  font-weight:500;max-width:88vw;text-align:center;opacity:0;transition:opacity .2s;z-index:150}
 #toast.on{opacity:1}
 
 /* ---------- bottom sheet ---------- */
@@ -101,7 +101,7 @@ button{font-family:var(--body);font-size:15px;border:0;cursor:pointer;color:inhe
 
 /* ---------- modal ---------- */
 #modal{position:fixed;inset:0;background:rgba(6,11,22,.86);backdrop-filter:blur(6px);
-  display:flex;align-items:flex-end;justify-content:center;z-index:50}
+  display:flex;align-items:flex-end;justify-content:center;z-index:100}
 #mbox{background:linear-gradient(180deg,#182642,#101a2e);width:100%;max-width:520px;
   border-radius:20px 20px 0 0;padding:18px 16px calc(var(--pad-b) + 16px);
   border-top:2px solid var(--brass);max-height:88vh;overflow-y:auto}
@@ -145,13 +145,13 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
 #logbox div{padding:3px 0;border-bottom:1px solid rgba(240,226,196,.07)}
 
 /* curtain for pass-and-play */
-#curtain{position:fixed;inset:0;z-index:70;display:flex;flex-direction:column;
+#curtain{position:fixed;inset:0;z-index:120;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:16px;background:var(--deep);text-align:center;padding:24px}
 #curtain .big{font-family:var(--disp);font-size:clamp(30px,10vw,52px);line-height:1;letter-spacing:-1.5px}
 #curtain .sm{opacity:.6;font-size:14px;max-width:280px;line-height:1.5}
 
 /* title */
-#title{position:fixed;inset:0;z-index:80;display:flex;flex-direction:column;
+#title{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;
   align-items:center;justify-content:center;background:
   radial-gradient(120% 80% at 50% 12%,#22406e 0%,#0d1524 58%,#060c18 100%);padding:24px;text-align:center}
 #title h1{font-family:var(--disp);font-size:clamp(46px,17vw,96px);margin:0;letter-spacing:-3px;
@@ -210,11 +210,11 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
   <button class="btn" id="fatalRetry">Reload</button>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" crossorigin="anonymous"></script>
 <script>
 /* cdnjs is blocked on some corporate and school networks. Fall back once,
    synchronously, before anything downstream tries to touch THREE. */
-if (!window.THREE) document.write('<scr' + 'ipt src="https://unpkg.com/three@0.128.0/build/three.min.js"><\/scr' + 'ipt>');
+if (!window.THREE) document.write('<scr' + 'ipt crossorigin="anonymous" src="https://unpkg.com/three@0.128.0/build/three.min.js"><\/scr' + 'ipt>');
 </script>
 <script src="engine.js"></script>
 <script>
@@ -454,8 +454,17 @@ function tap(p) {
     if (o && o.userData.pick) { o.userData.pick(); return; }
   }
 }
+var loopDead = false;
 function animate() {
+  if (loopDead) return;
   requestAnimationFrame(animate);
+  try { frame(); }
+  catch (err) {
+    loopDead = true;
+    fatal('The board stopped drawing', (err && err.message) ? err.message : String(err));
+  }
+}
+function frame() {
   camera.position.set(
     cam.target.x + cam.dist * Math.sin(cam.phi) * Math.sin(cam.theta),
     cam.target.y + cam.dist * Math.cos(cam.phi),
@@ -1418,7 +1427,15 @@ $('fatalRetry').onclick = function () { location.reload(); };
 // Anything that escapes gets shown on screen. On a phone there is no console,
 // and a silent failure looks identical to an unresponsive button.
 window.addEventListener('error', function (e) {
-  fatal('Something went wrong', (e.message || 'Unknown error') +
+  // Browsers report cross-origin script failures as a bare "Script error." with
+  // no detail. Say something actionable rather than showing that to the player.
+  if (!e.message || /^script error/i.test(e.message)) {
+    fatal('A loaded script failed',
+      'The browser will not say which one, which almost always means a file served from another domain. ' +
+      'Check the connection, then reload.');
+    return;
+  }
+  fatal('Something went wrong', e.message +
     (e.filename ? '  (' + String(e.filename).split('/').pop() + ':' + e.lineno + ')' : ''));
 });
 window.addEventListener('unhandledrejection', function (e) {
