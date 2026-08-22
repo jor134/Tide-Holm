@@ -202,8 +202,9 @@ input[type=text]::placeholder{color:rgba(240,226,196,.35)}
 <div id="title">
   <h1>TIDE<br>HOLM</h1>
   <div class="tag">Settle the shallow sea</div>
+  <div class="stack" id="resumeSlot" style="margin-bottom:9px"></div>
   <div class="stack">
-    <button class="btn hot" id="tHost"><span>Start a table</span></button>
+    <button class="btn" id="tHost"><span>Start a table</span></button>
     <button class="btn" id="tJoin"><span>Join with a code</span></button>
     <button class="btn" id="tSolo"><span>Play against bots</span></button>
     <button class="btn" id="tLocal"><span>Pass one phone around</span></button>
@@ -225,6 +226,7 @@ if (!window.THREE) document.write('<scr' + 'ipt crossorigin="anonymous" src="htt
 </script>
 <script src="engine.js"></script>
 <script src="bot.js"></script>
+<script src="save.js"></script>
 <script>
 'use strict';
 var E = window.ENGINE;   // reassigned by preflight() once load order is confirmed
@@ -352,7 +354,22 @@ function pushLocal() {
   // whoever is currently acting. The curtain covers the handover.
   var g = Net.localGame;
   Net.state = E.redact(g, g.players[viewSeat(g)].id);
+  autosave(g);
   Net.onState(Net.state);
+}
+
+/* Written after every action, human or bot, so closing the tab mid-turn loses
+   nothing. A finished game clears itself so the title screen does not offer to
+   resume something that is over. */
+var saveWarned = false;
+function autosave(g) {
+  if (!window.SAVE || !g || g.mode !== 'local') return;
+  if (g.phase === 'over') { SAVE.clear(); return; }
+  var r = SAVE.write(g);
+  if (!r.ok && !saveWarned) {
+    saveWarned = true;
+    toast('This game cannot be saved: ' + r.error);
+  }
 }
 function localAct(action) {
   var g = Net.localGame;
@@ -1377,6 +1394,7 @@ function nameInput(ph) {
 function ready() {
   if (!window.ENGINE) { fatal('engine.js did not load', 'Commit engine.js next to index.html at the repo root and redeploy.'); return false; }
   if (!window.BOT) { fatal('bot.js did not load', 'Commit bot.js next to index.html at the repo root and redeploy.'); return false; }
+  if (!window.SAVE) { fatal('save.js did not load', 'Commit save.js next to index.html at the repo root and redeploy.'); return false; }
   if (!window.THREE) { fatal('The 3D library did not load', 'three.js is loaded from a CDN and did not arrive. Check the connection or whether this network blocks it.'); return false; }
   return true;
 }
@@ -1440,6 +1458,88 @@ $('tJoin').onclick = function () {
   modal(box, { dismiss: true });
 };
 
+/* ---- resume ---- */
+function confirmModal(title, msg, okLabel, onOk) {
+  var box = el('div');
+  box.appendChild(el('h2', null, title));
+  box.appendChild(el('p', 'sub', msg));
+  var row = el('div', 'row');
+  var no = el('button', 'btn', 'Cancel');
+  no.onclick = closeModal;
+  var yes = el('button', 'btn hot', okLabel);
+  yes.onclick = function () { closeModal(); onOk(); };
+  row.appendChild(no); row.appendChild(yes);
+  box.appendChild(row);
+  modal(box, { dismiss: true });
+}
+
+function saveSummaryLine(m) {
+  if (!m) return '';
+  var who = m.solo
+    ? m.bots + (m.bots === 1 ? ' bot' : ' bots') + ' \u00b7 ' + m.levels.map(function (k) {
+        return BOT.LEVELS[k] ? BOT.LEVELS[k].name.toLowerCase() : k;
+      }).join(', ')
+    : m.players + ' players';
+  var lead = m.leader ? ' \u00b7 ' + m.leader + ' leads on ' + m.leaderPoints : '';
+  return who + lead + ' \u00b7 ' + m.when;
+}
+
+function refreshResume() {
+  var host = $('resumeSlot');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!window.SAVE || !SAVE.exists()) return;
+  var m = null;
+  try { m = SAVE.describe(); } catch (e) { m = null; }
+
+  var b = el('button', 'btn hot');
+  b.appendChild(el('span', null, 'Resume game'));
+  b.appendChild(el('span', 'c', saveSummaryLine(m)));
+  b.onclick = resumeGame;
+  host.appendChild(b);
+
+  var d = el('button', 'btn');
+  d.style.minHeight = '40px';
+  d.appendChild(el('span', null, 'Abandon saved game'));
+  d.onclick = function () {
+    confirmModal('Abandon the saved game?', 'It will be deleted and cannot be brought back.',
+      'Abandon it', function () { SAVE.clear(); refreshResume(); toast('Saved game deleted.'); });
+  };
+  host.appendChild(d);
+}
+
+function resumeGame() {
+  if (!ready()) return;
+  var r;
+  try { r = SAVE.read(); }
+  catch (e) { r = { ok: false, message: 'That saved game could not be read.' }; }
+  if (!r.ok) {
+    confirmModal('That game cannot be reopened',
+      (r.message || 'The save is unreadable.') + ' You can delete it and start fresh.',
+      'Delete it', function () { SAVE.clear(); refreshResume(); });
+    return;
+  }
+  var g = r.game;
+  Net.mode = 'local'; Net.localGame = g; Net.pid = null;
+  Net.humans = [];
+  g.players.forEach(function (p, i) { if (!p.bot) Net.humans.push(i); });
+  Net.lastHuman = Net.humans.length ? Net.humans[0] : 0;
+  curtainFor = null;
+  closeModal();
+  pushLocal();
+  scheduleBot(700);
+}
+
+/* Starting a new local game destroys the saved one, so say so first. */
+function startLocal(specs) {
+  var go = function () { closeModal(); LocalStart(specs); };
+  if (window.SAVE && SAVE.exists()) {
+    confirmModal('Replace the saved game?',
+      'You have a game in progress: ' + saveSummaryLine(SAVE.describe()) + '. Starting a new one deletes it.',
+      'Start a new game', function () { SAVE.clear(); go(); });
+  } else go();
+}
+
 var BOT_NAMES = ['Marn', 'Ossic', 'Vell', 'Threnn', 'Dolm'];
 var localBots = { count: 0, level: 'steady' };
 
@@ -1500,8 +1600,7 @@ $('tSolo').onclick = function () {
     store('tideholm_name', me);
     var specs = [{ name: me, bot: false }];
     for (var i = 0; i < state.count; i++) specs.push({ name: BOT_NAMES[i], bot: true, level: state.level });
-    closeModal();
-    LocalStart(specs);
+    startLocal(specs);
   };
   box.appendChild(go);
   modal(box, { dismiss: true });
@@ -1546,8 +1645,7 @@ $('tLocal').onclick = function () {
     for (var b = 0; b < localBots.count; b++) {
       specs.push({ name: BOT_NAMES[b], bot: true, level: localBots.level });
     }
-    closeModal();
-    LocalStart(specs);
+    startLocal(specs);
   };
   box.appendChild(go);
   modal(box, { dismiss: true });
@@ -1644,6 +1742,11 @@ function preflight() {
     return false;
   }
   E = window.ENGINE;
+  if (!window.SAVE) {
+    fatal('save.js did not load',
+      'Saved games live in a separate file. Commit save.js next to index.html at the repo root and redeploy.');
+    return false;
+  }
   if (!window.BOT) {
     fatal('bot.js did not load',
       'The opponents live in a separate file. Commit bot.js next to index.html at the repo root and redeploy.');
@@ -1658,6 +1761,7 @@ function preflight() {
 }
 
 if (preflight()) {
+  try { refreshResume(); } catch (e) {}
   try { initScene(); }
   catch (err) { fatal('The board could not be drawn', err && err.message ? err.message : String(err)); }
 }
