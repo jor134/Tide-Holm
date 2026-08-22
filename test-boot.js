@@ -63,7 +63,7 @@ function run(opts) {
   var els = {};
   ['cv', 'hud', 'rail', 'spacer', 'status', 'dice', 'stxt', 'sheet', 'hand', 'acts',
     'toast', 'modal', 'mbox', 'curtain', 'title', 'tHost', 'tJoin', 'tLocal', 'install',
-    'fatal', 'fatalTitle', 'fatalMsg', 'fatalRetry', 'fit', 'tSolo', 'logbox'].forEach(function (id) { els[id] = fakeEl(id); });
+    'fatal', 'fatalTitle', 'fatalMsg', 'fatalRetry', 'fit', 'tSolo', 'resumeSlot', 'logbox'].forEach(function (id) { els[id] = fakeEl(id); });
   // mirror the class="hide" that these carry in the markup
   ['hud', 'modal', 'curtain', 'fatal', 'install'].forEach(function (id) { els[id].classList.add('hide'); });
 
@@ -95,6 +95,9 @@ function run(opts) {
   win.THREE = opts.three ? makeThree() : undefined;
   win.ENGINE = opts.engine ? require('/home/claude/tideholm/engine.js') : undefined;
   win.BOT = opts.bot === false ? undefined : (opts.engine ? require('/home/claude/tideholm/bot.js') : undefined);
+  win.SAVE = opts.save === false ? undefined : (opts.engine ? require('/home/claude/tideholm/save.js') : undefined);
+  if (win.SAVE) win.SAVE.attach({ _d: {}, getItem: function (k) { return this._d[k] || null; },
+    setItem: function (k, v) { this._d[k] = String(v); }, removeItem: function (k) { delete this._d[k]; } });
 
   var thrown = null;
   try { vm.createContext(win); vm.runInContext(code, win, { filename: 'client.js' }); }
@@ -188,6 +191,15 @@ ok(e.handlers.every(function (h) { return h === 'function'; }), 'E: buttons stil
 ok(e.tapErrors.length === 0, 'E: tapping throws nothing without bot.js (' + e.tapErrors.join('; ') + ')');
 ok(e.fatalShown, 'E: missing bot.js shows an on-screen explanation');
 ok(/bot\.js/.test(e.fatalText), 'E: the message names bot.js as the problem');
+
+console.log('--- scenario F: save.js fails to load ---');
+var f = run({ three: true, engine: true, save: false });
+console.log('  threw:', f.thrown ? f.thrown.message : 'no');
+console.log('  handlers:', f.handlers.join(', '), '| overlay:', f.fatalShown ? f.fatalText : 'none');
+ok(f.handlers.every(function (h) { return h === 'function'; }), 'F: buttons still wired without save.js');
+ok(f.tapErrors.length === 0, 'F: tapping throws nothing without save.js (' + f.tapErrors.join('; ') + ')');
+ok(f.fatalShown, 'F: missing save.js shows an on-screen explanation');
+ok(/save\.js/.test(f.fatalText), 'F: the message names save.js as the problem');
 
 console.log('\nPASS ' + pass + '   FAIL ' + fail);
 fails.forEach(function (f) { console.log('  ✗ ' + f); });

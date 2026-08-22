@@ -9,6 +9,7 @@ two play modes, authoritative server. Not affiliated with Catan or Catan GmbH.
 index.html        the game
 engine.js         rules engine — shared by browser and server, do not duplicate
 bot.js            AI opponents — shared by browser and tests
+save.js           saving and resuming local games
 api/game.js       authoritative server (CommonJS — Vercel Node 20)
 manifest.json     PWA manifest
 sw.js             service worker (app shell cached, /api never cached)
@@ -42,6 +43,34 @@ discard, ports at 3:1 and 2:1, all five development card types, player-to-player
 trading, Long Road, Standing Guard, hidden victory point cards, 2–6 players.
 
 Not in: the Seafarers-style variant (ships, islands, gold hexes). That is Stage 2.
+
+## Saving
+
+Local games — solo and pass-and-play — autosave after every action, human or
+bot. The title screen offers **Resume game** with a one-line summary. A finished
+game clears its own save. Starting a new local game asks before overwriting.
+
+The board is not stored. It is fully determined by the seed, so a save keeps the
+seed plus a fingerprint of the board it expects, and regenerates the rest on
+load. That is 1.5 KB instead of 18 KB. If board generation ever changes, the
+fingerprint stops matching and the save is refused with an explanation, rather
+than loading a game whose settlements sit on the wrong hexes. **If you change
+genBoard() in Stage 2, bump `FORMAT` in save.js** so old saves fail cleanly.
+
+A save is plain text in localStorage and the player can edit it. `validate()`
+checks structure, ranges, and resource conservation before the state reaches the
+engine, so an edited save that hands someone 20 of everything is rejected. This
+is not real anti-cheat and is not meant to be — it is solo play on the player's
+own device. It exists so a corrupted save fails loudly instead of producing a
+broken game.
+
+**iOS caveat worth knowing:** Safari deletes script-writable storage after seven
+days without a visit. Installing to the home screen exempts the app, so a saved
+solo game only reliably survives if Tideholm is installed rather than run in a
+browser tab.
+
+Remote games are not saved locally — the server already holds that state, and
+tables expire after 48 hours.
 
 ## Bots
 
