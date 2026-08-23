@@ -120,6 +120,26 @@ neighbour, which is what the overlapping tiles were.
 Current clearance is a 0.011-unit seam. test-geometry.js enforces all of this
 and does an exhaustive separating-axis check on all 171 hex pairs.
 
+## Tile decoration
+
+The number token owns a reserved disc in the middle of every tile
+(`TOKEN_CLEAR`, radius 0.40) and all terrain props live in the ring outside it.
+Placements are a data table, `DECOR`, between the `DECOR-START` and `DECOR-END`
+markers in index.html. test-geometry.js evaluates that block directly, so the
+test can never drift from what renders.
+
+Two rules for anything added there:
+- inner edge (`distance - r`) must be at least `TOKEN_CLEAR`, or it covers the number
+- outer edge (`distance + r`) must be within `HEX_INRADIUS` (0.831), or it spills onto the next tile
+
+Props placed by eye will break the first rule. The original clay pit was a
+radius-0.5 disc at the tile centre, which hid its number entirely except during
+the moment the token lifts on a matching roll — four of the five terrain types
+had the same fault to a lesser degree.
+
+The raider stands on top of the number disc rather than through it. It is
+narrower than the token, so the digits still read.
+
 ## Camera
 
 `fitCamera()` computes the distance at which the board's bounding sphere

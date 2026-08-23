@@ -144,9 +144,9 @@ ok(!/rotation\.y = Math\.PI \/ 6/.test(src), 'no hardcoded 30-degree yaw remains
 var hexBlock = src.slice(src.indexOf('b.hexes.forEach'), src.indexOf('// ports'));
 ok(/rotation\.y = HEX_YAW/.test(hexBlock), 'hex prisms use the shared yaw constant');
 
-/* ---------- 6. terrain decoration must stay on its own tile ----------
-   Every prop is sampled around its own footprint and each sample point tested
-   against the hexagon, rather than eyeballing the offsets. */
+/* ---------- 6. terrain decoration must stay on its own tile, and off the number ----------
+   Reads the DECOR table straight out of index.html rather than restating the
+   placements here, so the test cannot drift from what actually renders. */
 function insideHex(px, pz, radius, yaw) {
   var inr = radius * Math.cos(Math.PI / 6);
   for (var i = 0; i < 6; i++) {
@@ -155,45 +155,75 @@ function insideHex(px, pz, radius, yaw) {
   }
   return true;
 }
-// sanity: the hexagon test itself must agree with the corners
 renderedCorners(R, YAW).forEach(function (c, i) {
   ok(insideHex(c.x * 0.999, c.z * 0.999, R, YAW), 'hex containment test accepts corner ' + i);
   ok(!insideHex(c.x * 1.02, c.z * 1.02, R, YAW), 'hex containment test rejects just outside corner ' + i);
 });
 
-function circle(cx, cz, r) {
-  var pts = [];
-  for (var a = 0; a < 32; a++) pts.push([cx + r * Math.cos(a / 32 * 6.2832), cz + r * Math.sin(a / 32 * 6.2832)]);
-  return pts;
-}
-function box(cx, cz, halfX, halfZ) {
-  return [[cx - halfX, cz - halfZ], [cx + halfX, cz - halfZ], [cx + halfX, cz + halfZ], [cx - halfX, cz + halfZ]];
-}
+var dStart = src.indexOf('/* DECOR-START'), dEnd = src.indexOf('/* DECOR-END */');
+ok(dStart > 0 && dEnd > dStart, 'the DECOR block is present and delimited');
+var decorSrc = src.slice(dStart, dEnd);
+decorSrc = decorSrc.slice(decorSrc.indexOf('var HEX_TOP'));
+var sandbox = { HEX_R_DRAW: R, Math: Math };
+var vm = require('vm');
+vm.createContext(sandbox);
+vm.runInContext(decorSrc + '\n;({HEX_TOP:HEX_TOP,TOKEN_R:TOKEN_R,TOKEN_H:TOKEN_H,TOKEN_Y:TOKEN_Y,TOKEN_LIFT:TOKEN_LIFT,TOKEN_CLEAR:TOKEN_CLEAR,HEX_INRADIUS:HEX_INRADIUS,DECOR:DECOR})', sandbox);
+var D = vm.runInContext('({HEX_TOP:HEX_TOP,TOKEN_R:TOKEN_R,TOKEN_H:TOKEN_H,TOKEN_Y:TOKEN_Y,TOKEN_LIFT:TOKEN_LIFT,TOKEN_CLEAR:TOKEN_CLEAR,HEX_INRADIUS:HEX_INRADIUS,DECOR:DECOR})', sandbox);
 
-var props = [];
-// mountain peaks: ConeGeometry(0.24 - i*0.03) at ((i-1)*0.36, +/-0.18)
-for (var i = 0; i < 3; i++) props.push(['mountain peak ' + i, circle((i - 1) * 0.36, (i % 2 ? 0.18 : -0.16), 0.24 - i * 0.03)]);
-// forest: ConeGeometry(0.17) at radius 0.44
-for (var j = 0; j < 4; j++) { var a = j * 1.57 + 0.4; props.push(['tree ' + j, circle(Math.cos(a) * 0.44, Math.sin(a) * 0.44, 0.17)]); }
-// field rows: BoxGeometry(1.2, .06, .13) at z = k*0.32
-for (var k = -1; k <= 1; k++) props.push(['field row ' + k, box(0, k * 0.32, 0.6, 0.065)]);
-// pasture: SphereGeometry(0.13) at ((m-1)*0.38, +/-0.22)
-for (var m = 0; m < 3; m++) props.push(['sheep ' + m, circle((m - 1) * 0.38, (m % 2 ? 0.22 : -0.2), 0.13)]);
-// clay pit: CylinderGeometry(0.42, 0.5) centred
-props.push(['clay pit', circle(0, 0, 0.5)]);
-// number token
-props.push(['number token', circle(0, 0, 0.33)]);
+ok(D.TOKEN_CLEAR > D.TOKEN_R, 'the reserved disc is wider than the number token');
+close(D.HEX_INRADIUS, R * Math.cos(Math.PI / 6), 1e-9, 'inradius derived from the rendered hex radius');
+ok(D.TOKEN_Y - D.TOKEN_H / 2 > D.HEX_TOP, 'the token sits above the tile surface');
+ok(D.TOKEN_LIFT > D.TOKEN_Y, 'the token lifts when its number is rolled');
 
-props.forEach(function (pr) {
-  var name = pr[0], pts = pr[1];
-  var worst = 0, bad = 0;
-  pts.forEach(function (pt) {
-    if (!insideHex(pt[0], pt[1], R, YAW)) bad++;
-    worst = Math.max(worst, Math.hypot(pt[0], pt[1]));
-  });
-  ok(bad === 0, name + ' stays inside its tile (' + bad + ' of ' + pts.length +
-    ' sample points outside, furthest ' + worst.toFixed(3) + ')');
+var terrains = Object.keys(D.DECOR);
+ok(terrains.length >= 5, 'every producing terrain has a decoration set (' + terrains.join(', ') + ')');
+['forest', 'mountain', 'pasture', 'pit', 'field'].forEach(function (t) {
+  ok(terrains.indexOf(t) >= 0, t + ' has decoration defined');
 });
+
+terrains.forEach(function (t) {
+  D.DECOR[t].forEach(function (p, i) {
+    var d = Math.hypot(p.x, p.z);
+    var label = t + ' prop ' + i;
+
+    // THE BUG: nothing may sit over the number, at any height above the tile
+    ok(d - p.r >= D.TOKEN_CLEAR - 1e-9,
+      label + ' clears the number disc (inner edge ' + (d - p.r).toFixed(3) +
+      ' >= ' + D.TOKEN_CLEAR.toFixed(3) + ')');
+
+    // and nothing may hang off the tile onto a neighbour
+    ok(d + p.r <= D.HEX_INRADIUS + 1e-9,
+      label + ' stays on its own tile (outer edge ' + (d + p.r).toFixed(3) +
+      ' <= ' + D.HEX_INRADIUS.toFixed(3) + ')');
+
+    // sample the actual footprint against the hexagon, not just a radius
+    var bad = 0;
+    for (var a = 0; a < 24; a++) {
+      var ang = a / 24 * Math.PI * 2;
+      if (!insideHex(p.x + Math.cos(ang) * p.r, p.z + Math.sin(ang) * p.r, R, YAW)) bad++;
+    }
+    ok(bad === 0, label + ' footprint is inside the hexagon (' + bad + ' of 24 points outside)');
+
+    ok(p.top > D.HEX_TOP, label + ' rises above the tile surface');
+  });
+});
+
+// the exact configuration that was reported: a solid disc over the clay number
+(function () {
+  var oldPit = { x: 0, z: 0, r: 0.50, top: 0.25 };
+  var inner = Math.hypot(oldPit.x, oldPit.z) - oldPit.r;
+  ok(inner < D.TOKEN_CLEAR, 'the old centred clay pit would fail this test (inner edge ' + inner.toFixed(2) + ')');
+  ok(oldPit.top > 0.19 + 0.07 / 2, 'and it stood above the old resting token, hiding the number');
+})();
+
+// the raider must not be buried in the token either
+var robberY = parseFloat((src.match(/rg\.position\.set\(rh\.cx, TOKEN_Y \+ TOKEN_H \/ 2 \+ ([\d.]+), rh\.cz\)/) || [])[1]);
+ok(isFinite(robberY), 'the raider is positioned relative to the token');
+ok(robberY > 0, 'the raider stands on top of the token rather than through it');
+
+// no stray hardcoded token geometry left behind
+ok(!/CylinderGeometry\(0\.33, 0\.33, 0\.07/.test(src), 'no hardcoded token geometry remains');
+ok(!/tk\.userData\.hot \? 0\.30 : 0\.19/.test(src), 'no hardcoded token heights remain');
 
 console.log('\nR=' + R + '  outline=' + OUT + '  yaw=' + YAW +
   '\nflat width ' + flatWidth.toFixed(4) + ', outline ' + outlineWidth.toFixed(4) +

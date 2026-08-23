@@ -253,6 +253,52 @@ var HEX_R_DRAW = 0.96;    // rendered radius; engine lattice radius is 1.0
 var HEX_OUTLINE = 1.035;  // outline scale — must keep 2*R*OUTLINE*cos(30) under the 1.7321 spacing
 var HEX_YAW = 0;
 
+/* DECOR-START — read verbatim by test-geometry.js, keep it self-contained.
+
+   The number token is the one thing on a tile that has to stay readable, so it
+   owns a reserved disc in the middle and every terrain prop lives in the ring
+   outside it. Props were previously placed by eye and four of the five terrain
+   types ended up sitting on top of their own number. */
+var HEX_TOP = 0.15;               // top face of the hex prism (height 0.3, centred on 0)
+var TOKEN_R = 0.33;               // number disc radius
+var TOKEN_H = 0.08;               // its thickness
+var TOKEN_Y = 0.26;               // resting centre — bottom clears every flat prop
+var TOKEN_LIFT = 0.40;            // raised centre when its number is rolled
+var TOKEN_CLEAR = TOKEN_R + 0.07; // no prop may enter this radius
+var HEX_INRADIUS = HEX_R_DRAW * Math.cos(Math.PI / 6);   // 0.8314 — props must stay inside
+
+// evenly spaced points on a ring, so nothing lands in the middle
+function decorRing(n, dist, phase) {
+  var out = [];
+  for (var i = 0; i < n; i++) {
+    var a = phase + i * Math.PI * 2 / n;
+    out.push({ x: Math.cos(a) * dist, z: Math.sin(a) * dist });
+  }
+  return out;
+}
+function decorSet(n, dist, phase, r, top, extra) {
+  return decorRing(n, dist, phase).map(function (p, i) {
+    var o = { x: p.x, z: p.z, r: r, top: top, i: i };
+    if (extra) for (var k in extra) o[k] = extra[k];
+    return o;
+  });
+}
+
+var DECOR = {
+  forest:   decorSet(5, 0.56, 0.35, 0.15, 0.55),
+  mountain: decorSet(3, 0.60, 0.50, 0.18, 0.60),
+  pasture:  decorSet(3, 0.55, 1.10, 0.12, 0.42),
+  pit:      decorSet(3, 0.60, 0.80, 0.19, 0.30),
+  // field rows are boxes; r is the radius of the circle that contains one
+  field: [
+    { x: 0.55, z: 0.26, r: 0.19, top: 0.24, halfX: 0.18, halfZ: 0.06 },
+    { x: 0.55, z: -0.26, r: 0.19, top: 0.24, halfX: 0.18, halfZ: 0.06 },
+    { x: -0.55, z: 0.26, r: 0.19, top: 0.24, halfX: 0.18, halfZ: 0.06 },
+    { x: -0.55, z: -0.26, r: 0.19, top: 0.24, halfX: 0.18, halfZ: 0.06 }
+  ]
+};
+/* DECOR-END */
+
 var TERCOL = { forest: 0x2e7d52, pit: 0xc4693c, pasture: 0x93c95e, field: 0xe3bb4a, mountain: 0x8b93a8, waste: 0xd9c9a3 };
 var DEVNAME = { knight: 'Knight', point: 'Charter', roads: 'Road Building', plenty: 'Bounty', monopoly: 'Monopoly' };
 var DEVDESC = {
@@ -598,7 +644,7 @@ function frame() {
   // signature: rolled tokens lift and glow
   Object.keys(tokenMeshes).forEach(function (k) {
     var tk = tokenMeshes[k];
-    var want = tk.userData.hot ? 0.30 : 0.19;
+    var want = tk.userData.hot ? TOKEN_LIFT : TOKEN_Y;
     tk.position.y += (want - tk.position.y) * 0.16;
     if (tk.userData.hot) {
       var s = 1 + Math.sin(t * 5) * 0.05;
@@ -644,40 +690,37 @@ function buildBoard(st) {
     grp.position.set(h.cx, 0, h.cz);
     boardGroup.add(grp);
 
-    // terrain relief
-    if (h.terrain === 'mountain') {
-      for (var i = 0; i < 3; i++) {
-        var pk = new THREE.Mesh(new THREE.ConeGeometry(0.24 - i * 0.03, 0.42 + i * 0.08, 4), toon(0x6f778c));
-        pk.position.set(h.cx + (i - 1) * 0.36, 0.32, h.cz + (i % 2 ? 0.18 : -0.16));
-        pk.rotation.y = 0.5; boardGroup.add(pk);
+    // terrain relief — placement comes from DECOR so nothing lands on the number
+    (DECOR[h.terrain] || []).forEach(function (d) {
+      var mesh;
+      if (h.terrain === 'mountain') {
+        var ph = d.top - HEX_TOP;
+        mesh = new THREE.Mesh(new THREE.ConeGeometry(d.r, ph, 4), toon(0x6f778c));
+        mesh.position.set(h.cx + d.x, HEX_TOP + ph / 2, h.cz + d.z);
+        mesh.rotation.y = 0.5;
+      } else if (h.terrain === 'forest') {
+        var th = d.top - HEX_TOP;
+        mesh = new THREE.Mesh(new THREE.ConeGeometry(d.r, th, 5), toon(0x1f5c39));
+        mesh.position.set(h.cx + d.x, HEX_TOP + th / 2, h.cz + d.z);
+      } else if (h.terrain === 'pasture') {
+        mesh = new THREE.Mesh(new THREE.SphereGeometry(d.r, 8, 6), toon(0xf3ecdc));
+        mesh.position.set(h.cx + d.x, d.top - d.r, h.cz + d.z);
+      } else if (h.terrain === 'pit') {
+        var ch = d.top - HEX_TOP;
+        mesh = new THREE.Mesh(new THREE.CylinderGeometry(d.r * 0.8, d.r, ch, 8), toon(0x9c4f2c));
+        mesh.position.set(h.cx + d.x, HEX_TOP + ch / 2, h.cz + d.z);
+      } else if (h.terrain === 'field') {
+        var fh = d.top - HEX_TOP;
+        mesh = new THREE.Mesh(new THREE.BoxGeometry(d.halfX * 2, fh, d.halfZ * 2), toon(0xc99f33));
+        mesh.position.set(h.cx + d.x, HEX_TOP + fh / 2, h.cz + d.z);
       }
-    } else if (h.terrain === 'forest') {
-      for (var j = 0; j < 4; j++) {
-        var a = j * 1.57 + 0.4;
-        var tr = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.44, 5), toon(0x1f5c39));
-        tr.position.set(h.cx + Math.cos(a) * 0.44, 0.33, h.cz + Math.sin(a) * 0.44);
-        boardGroup.add(tr);
-      }
-    } else if (h.terrain === 'field') {
-      for (var k = -1; k <= 1; k++) {
-        var row = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.06, 0.13), toon(0xc99f33));
-        row.position.set(h.cx, 0.17, h.cz + k * 0.32); boardGroup.add(row);
-      }
-    } else if (h.terrain === 'pasture') {
-      for (var m = 0; m < 3; m++) {
-        var sh = new THREE.Mesh(new THREE.SphereGeometry(0.13, 7, 5), toon(0xf3ecdc));
-        sh.position.set(h.cx + (m - 1) * 0.38, 0.24, h.cz + (m % 2 ? 0.22 : -0.2));
-        boardGroup.add(sh);
-      }
-    } else if (h.terrain === 'pit') {
-      var p1 = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.5, 0.14, 8), toon(0x9c4f2c));
-      p1.position.set(h.cx, 0.18, h.cz); boardGroup.add(p1);
-    }
+      if (mesh) boardGroup.add(mesh);
+    });
 
     if (h.num) {
-      var tk = new THREE.Mesh(new THREE.CylinderGeometry(0.33, 0.33, 0.07, 24),
+      var tk = new THREE.Mesh(new THREE.CylinderGeometry(TOKEN_R, TOKEN_R, TOKEN_H, 24),
         [toon(0xe6dcc0), new THREE.MeshBasicMaterial({ map: tokenTexture(h.num) }), toon(0xe6dcc0)]);
-      tk.position.set(h.cx, 0.19, h.cz);
+      tk.position.set(h.cx, TOKEN_Y, h.cz);
       tk.userData.hex = h.id;
       boardGroup.add(tk);
       tokenMeshes[h.id] = tk;
@@ -744,7 +787,9 @@ function buildPieces(st) {
   rg.add(outlined(new THREE.ConeGeometry(0.2, 0.44, 7), toon(0x241d2e), 1.1));
   var head = outlined(new THREE.SphereGeometry(0.13, 10, 8), toon(0x241d2e), 1.1);
   head.position.y = 0.3; rg.add(head);
-  rg.position.set(rh.cx, 0.42, rh.cz);
+  // stands on the number disc rather than through it; a blocked hex produces
+  // nothing anyway, and the raider is narrower than the token so the digits show
+  rg.position.set(rh.cx, TOKEN_Y + TOKEN_H / 2 + 0.22, rh.cz);
   pieceGroup.add(rg);
   robberMesh = rg;
 }
