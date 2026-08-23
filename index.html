@@ -466,7 +466,7 @@ function act(action) {
    ============================================================ */
 var scene, camera, renderer, raycaster, boardGroup, markerGroup, pieceGroup;
 var toonGrad, meshes = {}, tokenMeshes = {}, robberMesh = null;
-var cam = { dist: 11, phi: 0.86, theta: 0, target: { x: 0, y: 0, z: 0 } };
+var cam = { dist: 11, phi: 0.86, theta: 0, panX: 0, panY: 0, target: { x: 0, y: 0, z: 0 } };
 
 function makeGradient() {
   var c = document.createElement('canvas'); c.width = 4; c.height = 1;
@@ -524,13 +524,26 @@ function initScene() {
   markerGroup = new THREE.Group(); scene.add(markerGroup);
 
   resize(true);
-  if ($('fit')) $('fit').onclick = function () { fitCamera(true); cam.phi = 0.86; cam.theta = 0; };
+  if ($('fit')) $('fit').onclick = function () { cam.panX = 0; cam.panY = 0; fitCamera(true); cam.phi = 0.86; cam.theta = 0; };
   window.addEventListener('resize', function () { resize(false); });
   window.addEventListener('orientationchange', function () { setTimeout(function () { resize(true); }, 250); });
   bindCamera(cv);
   animate();
 }
 var BOARD_R = 5.9;   // outer hex ring (4.6) + port docks + a little margin
+
+/* How much of the screen the HUD is covering right now. The rail sits over the
+   top, the sheet over the bottom, and the sheet grows and shrinks with the
+   buttons in it — so this is measured, not assumed. */
+function uiInsets() {
+  var hud = $('hud');
+  if (!hud || hud.classList.contains('hide')) return { top: 0, bottom: 0 };
+  var top = 0, bottom = 0;
+  var rail = $('rail'), sheet = $('sheet');
+  if (rail) top = Math.max(0, rail.getBoundingClientRect().bottom);
+  if (sheet) bottom = Math.max(0, innerHeight - sheet.getBoundingClientRect().top);
+  return { top: top, bottom: bottom };
+}
 
 function resize(refit) {
   var w = innerWidth, h = innerHeight;
@@ -541,20 +554,94 @@ function resize(refit) {
   fitCamera(refit !== false);
 }
 
-/* Distance at which a sphere of BOARD_R is fully inside the frustum, checked
-   against BOTH axes. On a portrait phone the horizontal field is the binding
-   constraint by a wide margin, which is what the old hardcoded 13.5 missed. */
+/* PROJECT-START — mirrored by test-camera.js, keep self-contained.
+   Where the board actually lands on screen. A bounding sphere is symmetric but
+   a tilted board is not: the near edge projects lower and larger than the far
+   edge projects up, so the sphere approximation both mis-sizes and mis-centres
+   it. This projects the real rim instead. Returns pixels, before any view
+   offset is applied. */
+function boardBox(d, phi, theta, fov, aspect, W, H, radius) {
+  var C = [d * Math.sin(phi) * Math.sin(theta), d * Math.cos(phi), d * Math.sin(phi) * Math.cos(theta)];
+  var L = Math.sqrt(C[0] * C[0] + C[1] * C[1] + C[2] * C[2]);
+  var z = [C[0] / L, C[1] / L, C[2] / L];
+  var x = [z[2], 0, -z[0]];                        // cross((0,1,0), z)
+  var xl = Math.sqrt(x[0] * x[0] + x[2] * x[2]) || 1;
+  x = [x[0] / xl, 0, x[2] / xl];
+  var y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  var t = Math.tan(fov * Math.PI / 180 / 2);
+  var b = { minX: 1e9, maxX: -1e9, minY: 1e9, maxY: -1e9 };
+  for (var a = 0; a < 48; a++) {
+    var an = a / 48 * Math.PI * 2;
+    for (var k = 0; k < 2; k++) {
+      var hy = k ? 0.7 : 0;                        // ground rim, and the tops of pieces
+      var p = [Math.cos(an) * radius, hy, Math.sin(an) * radius];
+      var r = [p[0] - C[0], p[1] - C[1], p[2] - C[2]];
+      var vx = r[0] * x[0] + r[1] * x[1] + r[2] * x[2];
+      var vy = r[0] * y[0] + r[1] * y[1] + r[2] * y[2];
+      var vz = r[0] * z[0] + r[1] * z[1] + r[2] * z[2];
+      if (-vz < 0.01) continue;                    // behind the camera
+      var sx = (1 + (vx / -vz) / (t * aspect)) / 2 * W;
+      var sy = (1 - (vy / -vz) / t) / 2 * H;
+      if (sx < b.minX) b.minX = sx;
+      if (sx > b.maxX) b.maxX = sx;
+      if (sy < b.minY) b.minY = sy;
+      if (sy > b.maxY) b.maxY = sy;
+    }
+  }
+  return b;
+}
+/* PROJECT-END */
+
+/* Smallest distance at which the whole board is inside the width and inside the
+   band the HUD leaves free. Projection scale is monotonic in distance, so a
+   binary search is exact and needs no trigonometric approximation. */
 function fitCamera(snap) {
-  var vFov = camera.fov * Math.PI / 180;
-  var hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
-  var d = Math.max(BOARD_R / Math.sin(vFov / 2), BOARD_R / Math.sin(hFov / 2));
+  var W = innerWidth, H = innerHeight;
+  var ins = uiInsets();
+  var freeH = Math.max(160, H - ins.top - ins.bottom);
+
+  function fits(d) {
+    var b = boardBox(d, cam.phi, cam.theta, camera.fov, camera.aspect, W, H, BOARD_R);
+    return (b.maxX - b.minX) <= W * 0.98 && (b.maxY - b.minY) <= freeH * 0.97;
+  }
+  var lo = 2, hi = 240;
+  for (var i = 0; i < 44; i++) {
+    var mid = (lo + hi) / 2;
+    if (fits(mid)) hi = mid; else lo = mid;
+  }
+  var d = hi;
+
   cam.fit = d;
-  cam.min = d * 0.34;
-  cam.max = d * 1.45;
-  if (snap) cam.dist = d;
+  cam.min = d * 0.30;         // pan exists now, so zooming in past the frame is fine
+  cam.max = d * 1.5;
+  if (snap) { cam.dist = d; cam.panX = 0; cam.panY = 0; cam.touched = false; }
   cam.dist = Math.max(cam.min, Math.min(cam.max, cam.dist));
   scene.fog.near = d * 0.55;
   scene.fog.far = d * 2.4;
+  recentre();
+}
+
+/* Bias the projection so the board sits in the middle of the free band instead
+   of the middle of the canvas. Doing it in the projection rather than by moving
+   the camera means orbit and zoom are untouched, and raycasting still works
+   because three folds the view offset into the projection matrix. */
+function recentre() {
+  var W = innerWidth, H = innerHeight;
+  var ins = uiInsets();
+  var b = boardBox(cam.dist, cam.phi, cam.theta, camera.fov, camera.aspect, W, H, BOARD_R);
+  var boardCentre = (b.minY + b.maxY) / 2;
+  var freeCentre = ins.top + (H - ins.top - ins.bottom) / 2;
+  cam.uiShift = boardCentre - freeCentre;          // positive pushes the board up
+  applyViewOffset();
+}
+
+function applyViewOffset() {
+  if (!camera) return;
+  var W = innerWidth, H = innerHeight;
+  var lim = { x: W * 0.55, y: H * 0.55 };
+  cam.panX = Math.max(-lim.x, Math.min(lim.x, cam.panX || 0));
+  cam.panY = Math.max(-lim.y, Math.min(lim.y, cam.panY || 0));
+  camera.setViewOffset(W, H, cam.panX, (cam.uiShift || 0) + cam.panY, W, H);
 }
 function clampDist(v) { return Math.max(cam.min, Math.min(cam.max, v)); }
 
@@ -562,10 +649,17 @@ function clampDist(v) { return Math.max(cam.min, Math.min(cam.max, v)); }
 function bindCamera(cv) {
   var drag = null, pinch = null, moved = 0, downT = 0, downPt = null;
   function pt(e, i) { var t = e.touches ? e.touches[i] : e; return { x: t.clientX, y: t.clientY }; }
+  function mid(e) {
+    var a = pt(e, 0), b = pt(e, 1);
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
   function down(e) {
     if (e.touches && e.touches.length === 2) {
       var a = pt(e, 0), b = pt(e, 1);
-      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist };
+      pinch = {
+        d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist,
+        mid: mid(e), panX: cam.panX, panY: cam.panY
+      };
       drag = null; return;
     }
     drag = pt(e, 0); downPt = drag; moved = 0; downT = Date.now();
@@ -574,6 +668,13 @@ function bindCamera(cv) {
     if (pinch && e.touches && e.touches.length === 2) {
       var a = pt(e, 0), b = pt(e, 1), d = Math.hypot(a.x - b.x, a.y - b.y);
       cam.dist = clampDist(pinch.dist * pinch.d / d);
+      cam.touched = true;
+      // dragging two fingers slides the board; the offset is in pixels, so the
+      // board tracks the fingers exactly
+      var m = mid(e);
+      cam.panX = pinch.panX - (m.x - pinch.mid.x);
+      cam.panY = pinch.panY - (m.y - pinch.mid.y);
+      applyViewOffset();
       e.preventDefault(); return;
     }
     if (!drag) return;
@@ -582,6 +683,8 @@ function bindCamera(cv) {
     moved += Math.abs(dx) + Math.abs(dy);
     cam.theta -= dx * 0.006;
     cam.phi = Math.max(0.42, Math.min(1.4, cam.phi - dy * 0.005));
+    cam.touched = true;
+    recentre();
     drag = p;
     e.preventDefault();
   }
@@ -589,7 +692,7 @@ function bindCamera(cv) {
   function up(e) {
     if (drag && moved < 12 && Date.now() - downT < 400) {
       var now = Date.now();
-      if (now - lastTap < 320) { fitCamera(true); cam.phi = 0.86; cam.theta = 0; lastTap = 0; }
+      if (now - lastTap < 320) { cam.panX = 0; cam.panY = 0; fitCamera(true); cam.phi = 0.86; cam.theta = 0; lastTap = 0; }
       else { lastTap = now; tap(downPt); }
     }
     drag = null; pinch = null;
@@ -598,9 +701,25 @@ function bindCamera(cv) {
   cv.addEventListener('touchmove', move, { passive: false });
   cv.addEventListener('touchend', up);
   cv.addEventListener('touchcancel', function () { drag = null; pinch = null; });
-  cv.addEventListener('mousedown', down);
-  window.addEventListener('mousemove', function (e) { if (drag) move(e); });
-  window.addEventListener('mouseup', up);
+  var mousePan = null;
+  cv.addEventListener('mousedown', function (e) {
+    if (e.shiftKey || e.button === 2) {
+      mousePan = { x: e.clientX, y: e.clientY, panX: cam.panX, panY: cam.panY };
+      e.preventDefault(); return;
+    }
+    down(e);
+  });
+  window.addEventListener('mousemove', function (e) {
+    if (mousePan) {
+      cam.panX = mousePan.panX - (e.clientX - mousePan.x);
+      cam.panY = mousePan.panY - (e.clientY - mousePan.y);
+      applyViewOffset();
+      return;
+    }
+    if (drag) move(e);
+  });
+  window.addEventListener('mouseup', function (e) { mousePan = null; up(e); });
+  cv.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   cv.addEventListener('wheel', function (e) {
     cam.dist = clampDist(cam.dist + e.deltaY * 0.012); e.preventDefault();
   }, { passive: false });
@@ -875,7 +994,15 @@ function render(st) {
   renderActions(st);
   renderMarkers(st);
   renderInterrupts(st);
+
+  // the sheet grows and shrinks with its buttons; keep the board framed in
+  // whatever space is left, without disturbing a manual pan or zoom
+  requestAnimationFrame(function () {
+    var sig = Math.round(uiInsets().top) + ':' + Math.round(uiInsets().bottom);
+    if (sig !== lastInsets) { lastInsets = sig; fitCamera(cam.panX === 0 && cam.panY === 0 && !cam.touched); }
+  });
 }
+var lastInsets = '';
 
 function renderRail(st) {
   var r = $('rail'); r.innerHTML = '';
