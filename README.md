@@ -142,18 +142,52 @@ narrower than the token, so the digits still read.
 
 ## Camera
 
-`fitCamera()` computes the distance at which the board's bounding sphere
-(`BOARD_R`, 5.9 world units) fits inside both the vertical and horizontal
-frustum, and widens the field of view to 58 degrees on viewports narrower than
-3:4. On a portrait phone the horizontal field is the binding constraint by a
-wide margin — a fixed distance tuned by eye will always clip the sides.
+`boardBox()` (between the `PROJECT-START` and `PROJECT-END` markers) projects the
+real board rim to pixels. `fitCamera()` binary-searches the smallest distance at
+which that box fits the screen width and the band the HUD leaves free. Projection
+scale is monotonic in distance, so the search is exact.
+
+A bounding sphere is not good enough here: it is symmetric, but a tilted board is
+not — the near edge projects lower and larger than the far edge projects up. The
+sphere version both mis-sized the board and left it sitting about 75px below the
+centre of the free band, so zooming in ate the bottom edge first.
+
+`uiInsets()` measures the rail and the sheet with `getBoundingClientRect()` rather
+than assuming heights, because the sheet grows and shrinks with its buttons — a
+trade sheet is much taller than a roll prompt. `recentre()` then biases the
+projection with `camera.setViewOffset()` so the board centres on the free band.
+Biasing the projection rather than moving the camera keeps orbit and zoom
+untouched, and raycasting still works because three folds the view offset into
+the projection matrix.
+
+**Controls**
+
+| Gesture | Does |
+|---|---|
+| One finger drag | Pan |
+| One finger tap | Select a spot |
+| Two fingers pinch | Zoom |
+| Two fingers twist | Rotate |
+| Two fingers slide up/down | Tilt |
+| Double tap, or ⤢ | Reset the view |
+| Desktop: drag | Pan |
+| Desktop: shift-drag or right-drag | Rotate and tilt |
+| Desktop: wheel | Zoom |
+
+Pan is clamped to 55% of the screen in each direction. Lifting one finger of two
+hands over to panning without snapping the view.
+
+Two sign conventions here are easy to invert and impossible to catch by reading
+the code, so both are measured in test-camera.js against the real projection:
+increasing `theta` turns the board **clockwise** on screen, so a clockwise finger
+twist adds to it; and pan subtracts the finger delta so the board tracks the
+finger rather than fleeing it. Inverting either one fails the tests.
 
 Zoom limits are multiples of the fitted distance, never absolute numbers.
-Double tap the board, or tap the ⤢ button, to refit.
 
 If you change the board size in Stage 2 (Seafarers adds sea hexes), raise
-`BOARD_R` to match or the board will overflow the screen again. test-camera.js
-will fail if you forget.
+`BOARD_R` to match. test-camera.js checks eleven viewports at four tilt angles
+and will fail if you forget.
 
 ## Known limitations
 

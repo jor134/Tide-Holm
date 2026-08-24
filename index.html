@@ -524,7 +524,7 @@ function initScene() {
   markerGroup = new THREE.Group(); scene.add(markerGroup);
 
   resize(true);
-  if ($('fit')) $('fit').onclick = function () { cam.panX = 0; cam.panY = 0; fitCamera(true); cam.phi = 0.86; cam.theta = 0; };
+  if ($('fit')) $('fit').onclick = resetView;
   window.addEventListener('resize', function () { resize(false); });
   window.addEventListener('orientationchange', function () { setTimeout(function () { resize(true); }, 250); });
   bindCamera(cv);
@@ -645,85 +645,112 @@ function applyViewOffset() {
 }
 function clampDist(v) { return Math.max(cam.min, Math.min(cam.max, v)); }
 
-/* --- camera control: one finger orbits, two fingers zoom --- */
+/* --- camera control ---
+   One finger pans. Two fingers pinch to zoom, twist to rotate, and slide up or
+   down to tilt. Twist direction was measured rather than guessed: increasing
+   theta rotates the board clockwise on screen, so a clockwise twist increases
+   it and the board turns with the fingers. */
 function bindCamera(cv) {
-  var drag = null, pinch = null, moved = 0, downT = 0, downPt = null;
+  var one = null, two = null, moved = 0, downT = 0, downPt = null, lastTap = 0;
   function pt(e, i) { var t = e.touches ? e.touches[i] : e; return { x: t.clientX, y: t.clientY }; }
-  function mid(e) {
+  function pair(e) {
     var a = pt(e, 0), b = pt(e, 1);
-    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      ang: Math.atan2(b.y - a.y, b.x - a.x),
+      mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    };
+  }
+
+  function startTwo(e) {
+    var g = pair(e);
+    two = { g: g, dist: cam.dist, theta: cam.theta, phi: cam.phi };
+    one = null;
   }
   function down(e) {
-    if (e.touches && e.touches.length === 2) {
-      var a = pt(e, 0), b = pt(e, 1);
-      pinch = {
-        d: Math.hypot(a.x - b.x, a.y - b.y), dist: cam.dist,
-        mid: mid(e), panX: cam.panX, panY: cam.panY
-      };
-      drag = null; return;
-    }
-    drag = pt(e, 0); downPt = drag; moved = 0; downT = Date.now();
+    if (e.touches && e.touches.length >= 2) { startTwo(e); return; }
+    one = pt(e, 0); downPt = one; moved = 0; downT = Date.now();
   }
   function move(e) {
-    if (pinch && e.touches && e.touches.length === 2) {
-      var a = pt(e, 0), b = pt(e, 1), d = Math.hypot(a.x - b.x, a.y - b.y);
-      cam.dist = clampDist(pinch.dist * pinch.d / d);
+    if (two && e.touches && e.touches.length >= 2) {
+      var g = pair(e);
+
+      cam.dist = clampDist(two.dist * two.g.dist / Math.max(1, g.dist));
+
+      // shortest angular difference, so the twist does not jump at +/-pi
+      var da = g.ang - two.g.ang;
+      while (da > Math.PI) da -= Math.PI * 2;
+      while (da < -Math.PI) da += Math.PI * 2;
+      cam.theta = two.theta + da;
+
+      // sliding both fingers up or down tilts, matching the old single-finger feel
+      cam.phi = Math.max(0.42, Math.min(1.4, two.phi - (g.mid.y - two.g.mid.y) * 0.005));
+
       cam.touched = true;
-      // dragging two fingers slides the board; the offset is in pixels, so the
-      // board tracks the fingers exactly
-      var m = mid(e);
-      cam.panX = pinch.panX - (m.x - pinch.mid.x);
-      cam.panY = pinch.panY - (m.y - pinch.mid.y);
-      applyViewOffset();
-      e.preventDefault(); return;
+      recentre();
+      e.preventDefault();
+      return;
     }
-    if (!drag) return;
+    if (!one) return;
     var p = pt(e, 0);
-    var dx = p.x - drag.x, dy = p.y - drag.y;
+    var dx = p.x - one.x, dy = p.y - one.y;
     moved += Math.abs(dx) + Math.abs(dy);
-    cam.theta -= dx * 0.006;
-    cam.phi = Math.max(0.42, Math.min(1.4, cam.phi - dy * 0.005));
+    // the board tracks the finger exactly, because the offset is in pixels
+    cam.panX -= dx;
+    cam.panY -= dy;
     cam.touched = true;
-    recentre();
-    drag = p;
+    applyViewOffset();
+    one = p;
     e.preventDefault();
   }
-  var lastTap = 0;
   function up(e) {
-    if (drag && moved < 12 && Date.now() - downT < 400) {
+    if (one && moved < 12 && Date.now() - downT < 400) {
       var now = Date.now();
-      if (now - lastTap < 320) { cam.panX = 0; cam.panY = 0; fitCamera(true); cam.phi = 0.86; cam.theta = 0; lastTap = 0; }
+      if (now - lastTap < 320) { resetView(); lastTap = 0; }
       else { lastTap = now; tap(downPt); }
     }
-    drag = null; pinch = null;
+    // lifting one finger of two must not snap the view; restart cleanly
+    if (two && e.touches && e.touches.length === 1) { one = pt(e, 0); moved = 99; two = null; return; }
+    one = null; two = null;
   }
   cv.addEventListener('touchstart', down, { passive: false });
   cv.addEventListener('touchmove', move, { passive: false });
   cv.addEventListener('touchend', up);
-  cv.addEventListener('touchcancel', function () { drag = null; pinch = null; });
-  var mousePan = null;
+  cv.addEventListener('touchcancel', function () { one = null; two = null; });
+
+  /* Desktop: drag pans, shift-drag or right-drag orbits, wheel zooms. */
+  var orbit = null;
   cv.addEventListener('mousedown', function (e) {
     if (e.shiftKey || e.button === 2) {
-      mousePan = { x: e.clientX, y: e.clientY, panX: cam.panX, panY: cam.panY };
+      orbit = { x: e.clientX, y: e.clientY, theta: cam.theta, phi: cam.phi };
       e.preventDefault(); return;
     }
     down(e);
   });
   window.addEventListener('mousemove', function (e) {
-    if (mousePan) {
-      cam.panX = mousePan.panX - (e.clientX - mousePan.x);
-      cam.panY = mousePan.panY - (e.clientY - mousePan.y);
-      applyViewOffset();
+    if (orbit) {
+      cam.theta = orbit.theta - (e.clientX - orbit.x) * 0.006;
+      cam.phi = Math.max(0.42, Math.min(1.4, orbit.phi - (e.clientY - orbit.y) * 0.005));
+      cam.touched = true;
+      recentre();
       return;
     }
-    if (drag) move(e);
+    if (one) move(e);
   });
-  window.addEventListener('mouseup', function (e) { mousePan = null; up(e); });
+  window.addEventListener('mouseup', function (e) { orbit = null; up(e); });
   cv.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   cv.addEventListener('wheel', function (e) {
-    cam.dist = clampDist(cam.dist + e.deltaY * 0.012); e.preventDefault();
+    cam.dist = clampDist(cam.dist + e.deltaY * 0.012);
+    recentre();
+    e.preventDefault();
   }, { passive: false });
 }
+
+function resetView() {
+  cam.panX = 0; cam.panY = 0; cam.phi = 0.86; cam.theta = 0;
+  fitCamera(true);
+}
+
 function tap(p) {
   if (!p || !markerGroup.children.length) return;
   var r = renderer.domElement.getBoundingClientRect();
